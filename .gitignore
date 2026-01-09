@@ -1,0 +1,43 @@
+# Rust
+rust/target/
+rust/Cargo.lock
+rust/src/proto/
+
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+go.sum
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+*.o
+*.a
+*.lib
+
+# Test binaries
+*.test
+*.out
+
+# Temporary files
+tmp/
+temp/
+
+# Binary files
+*.bin
+*.exe
+*.dll
+*.so
+*.dylib

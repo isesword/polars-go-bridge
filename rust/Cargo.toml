@@ -1,0 +1,17 @@
+[package]
+name = "polars-bridge"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+polars = { version = "0.52", features = ["lazy", "json", "timezones"] }
+prost = "0.13"
+arrow = { version = "53", features = ["ffi"] }
+libc = "0.2"
+serde_json = "1.0"
+
+[build-dependencies]
+prost-build = "0.13"

@@ -1,0 +1,128 @@
+syntax = "proto3";
+
+package polars_bridge;
+
+option go_package = "github.com/polars-go-bridge/proto";
+
+// Plan 版本 v1
+message Plan {
+  uint32 plan_version = 1;  // 当前为 1
+  Node root = 2;
+}
+
+// 节点定义
+message Node {
+  uint32 id = 1;
+  oneof kind {
+    MemoryScan memory_scan = 10;
+    Project project = 11;
+    Filter filter = 12;
+    WithColumns with_columns = 13;
+    Limit limit = 16;
+  }
+  
+  reserved 50 to 99;   // join/window reserved
+  reserved 100 to 149; // udf reserved
+}
+
+// Memory Scan（从输入 Arrow 读取）
+message MemoryScan {
+  repeated string column_names = 1;
+}
+
+// Project（选择列）
+message Project {
+  Node input = 1;
+  repeated Expr expressions = 2;
+}
+
+// Filter（过滤）
+message Filter {
+  Node input = 1;
+  Expr predicate = 2;
+}
+
+// WithColumns（添加/修改列）
+message WithColumns {
+  Node input = 1;
+  repeated Expr expressions = 2;
+}
+
+// Limit（限制行数）
+message Limit {
+  Node input = 1;
+  uint64 n = 2;
+}
+
+// 表达式
+message Expr {
+  oneof kind {
+    Column col = 1;
+    Literal lit = 2;
+    BinaryExpr binary = 3;
+    Alias alias = 4;
+    IsNull is_null = 5;
+  }
+  
+  reserved 50 to 99;   // string functions reserved
+  reserved 100 to 149; // window functions reserved
+}
+
+// 列引用
+message Column {
+  string name = 1;
+}
+
+// 字面量
+message Literal {
+  oneof value {
+    int64 int_val = 1;
+    double float_val = 2;
+    bool bool_val = 3;
+    string string_val = 4;
+    NullValue null_val = 5;
+  }
+}
+
+message NullValue {}
+
+// 二元表达式
+message BinaryExpr {
+  Expr left = 1;
+  BinaryOperator op = 2;
+  Expr right = 3;
+}
+
+enum BinaryOperator {
+  ADD = 0;
+  SUB = 1;
+  MUL = 2;
+  DIV = 3;
+  EQ = 4;
+  NE = 5;
+  LT = 6;
+  LE = 7;
+  GT = 8;
+  GE = 9;
+  AND = 10;
+  OR = 11;
+}
+
+// 别名
+message Alias {
+  Expr expr = 1;
+  string name = 2;
+}
+
+// 空值检查
+message IsNull {
+  Expr expr = 1;
+}
+
+// 数据类型
+enum DataType {
+  INT64 = 0;
+  FLOAT64 = 1;
+  BOOL = 2;
+  UTF8 = 3;
+}
