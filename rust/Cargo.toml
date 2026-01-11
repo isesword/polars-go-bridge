@@ -7,7 +7,8 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
-polars = { version = "0.52", features = ["lazy", "json", "timezones"] }
+polars = { version = "0.52", features = ["lazy", "json", "timezones", "csv", "parquet", "ipc", "strings", "regex", "string_pad"] }
+polars-arrow = { package = "polars-arrow", version = "0.52" }
 prost = "0.13"
 arrow = { version = "53", features = ["ffi"] }
 libc = "0.2"

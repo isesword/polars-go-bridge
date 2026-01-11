@@ -1,30 +1,92 @@
+use std::sync::Arc;
+
 use crate::error::BridgeError;
 use polars::prelude::*;
-use arrow::ffi::{FFI_ArrowSchema, FFI_ArrowArray};
+use polars_arrow::array::StructArray;
+use polars_arrow::datatypes::{ArrowDataType, ArrowSchema, Field};
+use polars_arrow::ffi::{
+    export_array_to_c, export_field_to_c, import_array_from_c, import_field_from_c, ArrowArray,
+    ArrowSchema as FFIArrowSchema,
+};
+use polars_arrow::record_batch::RecordBatch;
 
 /// 将 Polars DataFrame 导出为 Arrow C Data Interface
-/// 
-/// 注意：此功能暂时不可用，因为 Polars 0.52 的 Arrow FFI API 发生了重大变化
-/// 建议使用 IPC 格式或 JSON 格式进行数据交换
 pub fn export_dataframe_to_arrow(
-    _df: &DataFrame,
-    _out_schema: *mut FFI_ArrowSchema,
-    _out_array: *mut FFI_ArrowArray,
+    df: &DataFrame,
+    out_schema: *mut FFIArrowSchema,
+    out_array: *mut ArrowArray,
 ) -> Result<(), BridgeError> {
-    Err(BridgeError::Unsupported(
-        "Arrow FFI export is not yet implemented for Polars 0.52. Please use JSON or IPC format.".into()
-    ))
+    if out_schema.is_null() || out_array.is_null() {
+        return Err(BridgeError::InvalidArgument(
+            "Null output schema/array pointers".into(),
+        ));
+    }
+
+    let record_batch = df.clone().rechunk_to_record_batch(CompatLevel::newest());
+    let height = record_batch.height();
+    let (schema, arrays) = record_batch.into_schema_and_arrays();
+    let fields: Vec<Field> = schema.iter_values().cloned().collect();
+    let dtype = ArrowDataType::Struct(fields.clone());
+
+    let struct_array = StructArray::try_new(dtype, height, arrays, None)
+        .map_err(|e| BridgeError::ArrowExport(e.to_string()))?;
+    let array = export_array_to_c(Box::new(struct_array));
+    let schema = export_field_to_c(&Field::new("".into(), ArrowDataType::Struct(fields), false));
+
+    unsafe {
+        std::ptr::write(out_array, array);
+        std::ptr::write(out_schema, schema);
+    }
+
+    Ok(())
 }
 
 /// 从 Arrow C Data Interface 导入 Polars DataFrame
-/// 
-/// 注意：此功能暂时不可用，因为 Polars 0.52 的 Arrow FFI API 发生了重大变化
-/// 建议使用 IPC 格式或 JSON 格式进行数据交换
 pub fn import_dataframe_from_arrow(
-    _in_schema: *const FFI_ArrowSchema,
-    _in_array: *const FFI_ArrowArray,
+    in_schema: *const FFIArrowSchema,
+    in_array: *const ArrowArray,
 ) -> Result<DataFrame, BridgeError> {
-    Err(BridgeError::Unsupported(
-        "Arrow FFI import is not yet implemented for Polars 0.52. Please use JSON or IPC format.".into()
-    ))
+    if in_schema.is_null() || in_array.is_null() {
+        return Err(BridgeError::InvalidArgument(
+            "Null input schema/array pointers".into(),
+        ));
+    }
+
+    let schema = unsafe { std::ptr::read(in_schema) };
+    let field = unsafe { import_field_from_c(&schema) }
+        .map_err(|e| BridgeError::ArrowImport(e.to_string()))?;
+
+    let dtype = field.dtype.clone();
+    let array = unsafe { std::ptr::read(in_array) };
+    let array = unsafe { import_array_from_c(array, dtype.clone()) }
+        .map_err(|e| BridgeError::ArrowImport(e.to_string()))?;
+
+    let fields = match dtype {
+        ArrowDataType::Struct(fields) => fields,
+        _ => {
+            return Err(BridgeError::ArrowImport(
+                "Arrow record batch must be a Struct type".into(),
+            ))
+        }
+    };
+
+    let struct_array = array
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .ok_or_else(|| {
+            BridgeError::ArrowImport("Arrow array is not a StructArray".into())
+        })?;
+
+    if struct_array.validity().is_some() {
+        return Err(BridgeError::ArrowImport(
+            "StructArray contains top-level nulls".into(),
+        ));
+    }
+
+    let schema: ArrowSchema = fields.into_iter().collect();
+    let arrays = struct_array.values().iter().cloned().collect::<Vec<_>>();
+    let record_batch = RecordBatch::try_new(struct_array.len(), Arc::new(schema), arrays)
+        .map_err(|e| BridgeError::ArrowImport(e.to_string()))?;
+
+    Ok(DataFrame::from(record_batch))
 }

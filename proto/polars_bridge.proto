@@ -15,9 +15,11 @@ message Node {
   uint32 id = 1;
   oneof kind {
     MemoryScan memory_scan = 10;
-    Project project = 11;
-    Filter filter = 12;
-    WithColumns with_columns = 13;
+    CsvScan csv_scan = 11;
+    ParquetScan parquet_scan = 12;
+    Project project = 13;
+    Filter filter = 14;
+    WithColumns with_columns = 15;
     Limit limit = 16;
   }
   
@@ -28,6 +30,16 @@ message Node {
 // Memory Scan（从输入 Arrow 读取）
 message MemoryScan {
   repeated string column_names = 1;
+}
+
+// CSV Scan（从 CSV 文件路径懒加载）
+message CsvScan {
+  string path = 1;  // 文件路径
+}
+
+// Parquet Scan（从 Parquet 文件路径懒加载）
+message ParquetScan {
+  string path = 1;  // 文件路径
 }
 
 // Project（选择列）
@@ -62,9 +74,31 @@ message Expr {
     BinaryExpr binary = 3;
     Alias alias = 4;
     IsNull is_null = 5;
+    Not not = 6;  // 逻辑取反
+    Wildcard wildcard = 7;  // 通配符（选择所有列）
+    Exclude exclude = 8;  // 排除列
+    Cast cast = 9;  // 类型转换
+    
+    // 字符串函数 (50-99)
+    StringFunction str_len_bytes = 50;
+    StringFunction str_len_chars = 51;
+    StringContains str_contains = 52;
+    StringStartsWith str_starts_with = 53;
+    StringEndsWith str_ends_with = 54;
+    StringExtract str_extract = 55;
+    StringReplace str_replace = 56;
+    StringReplace str_replace_all = 57;
+    StringFunction str_to_lowercase = 58;
+    StringFunction str_to_uppercase = 59;
+    StringFunction str_to_titlecase = 60;
+    StringStripChars str_strip_chars = 61;
+    StringSlice str_slice = 62;
+    StringSplit str_split = 63;
+    StringPad str_pad_start = 64;
+    StringPad str_pad_end = 65;
   }
   
-  reserved 50 to 99;   // string functions reserved
+  reserved 66 to 99;   // 预留更多字符串函数
   reserved 100 to 149; // window functions reserved
 }
 
@@ -106,6 +140,9 @@ enum BinaryOperator {
   GE = 9;
   AND = 10;
   OR = 11;
+  MOD = 12;  // 取模运算 %
+  POW = 13;  // 幂运算 **
+  XOR = 14;  // 异或运算 ^
 }
 
 // 别名
@@ -119,10 +156,111 @@ message IsNull {
   Expr expr = 1;
 }
 
+// 逻辑取反
+message Not {
+  Expr expr = 1;
+}
+
+// 通配符（选择所有列）
+message Wildcard {
+  // 空消息，用于表示选择所有列
+}
+
+// 排除列
+message Exclude {
+  Expr expr = 1;  // 基础表达式（通常是 Wildcard）
+  repeated string columns = 2;  // 要排除的列名
+}
+
+// 类型转换
+message Cast {
+  Expr expr = 1;  // 要转换的表达式
+  DataType data_type = 2;  // 目标数据类型
+  bool strict = 3;  // 严格模式（默认 true）
+}
+
 // 数据类型
 enum DataType {
   INT64 = 0;
-  FLOAT64 = 1;
-  BOOL = 2;
-  UTF8 = 3;
+  INT32 = 1;
+  INT16 = 2;
+  INT8 = 3;
+  UINT64 = 4;
+  UINT32 = 5;
+  UINT16 = 6;
+  UINT8 = 7;
+  FLOAT64 = 8;
+  FLOAT32 = 9;
+  BOOL = 10;
+  UTF8 = 11;  // String
+  DATE = 12;
+  DATETIME = 13;
+  TIME = 14;
+}
+
+// ============ 字符串函数消息类型 ============
+
+// 通用字符串函数（单一表达式）
+message StringFunction {
+  Expr expr = 1;
+}
+
+// 字符串包含检查
+message StringContains {
+  Expr expr = 1;
+  string pattern = 2;
+  bool literal = 3;  // true: 字面字符串, false: 正则表达式
+}
+
+// 字符串前缀检查
+message StringStartsWith {
+  Expr expr = 1;
+  string prefix = 2;
+}
+
+// 字符串后缀检查
+message StringEndsWith {
+  Expr expr = 1;
+  string suffix = 2;
+}
+
+// 字符串提取（正则）
+message StringExtract {
+  Expr expr = 1;
+  string pattern = 2;
+  uint32 group_index = 3;  // 捕获组索引
+}
+
+// 字符串替换
+message StringReplace {
+  Expr expr = 1;
+  string pattern = 2;
+  string value = 3;
+  bool literal = 4;  // true: 字面字符串, false: 正则表达式
+}
+
+// 字符串修剪
+message StringStripChars {
+  Expr expr = 1;
+  string chars = 2;  // 要移除的字符，空字符串表示移除空白字符
+}
+
+// 字符串切片
+message StringSlice {
+  Expr expr = 1;
+  int64 offset = 2;  // 起始位置（可为负数）
+  optional uint64 length = 3;  // 长度（可选）
+}
+
+// 字符串分割
+message StringSplit {
+  Expr expr = 1;
+  string by = 2;  // 分隔符
+}
+
+// 字符串填充
+message StringPad {
+  Expr expr = 1;
+  uint64 length = 2;  // 目标长度
+  string fill_char = 3;  // 填充字符
 }

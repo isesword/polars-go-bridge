@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"syscall"
 	"unsafe"
+	
 )
 
 // Bridge Rust FFI 接口
@@ -23,7 +24,12 @@ type Bridge struct {
 	planCompile       *syscall.Proc
 	planFree          *syscall.Proc
 	planExecuteSimple *syscall.Proc
+	planExecutePrint  *syscall.Proc
 	planExecuteArrow  *syscall.Proc
+	planCollectDF     *syscall.Proc
+	dfToIPC           *syscall.Proc
+	dfPrint           *syscall.Proc
+	dfFree            *syscall.Proc
 	outputFree        *syscall.Proc
 }
 
@@ -78,8 +84,23 @@ func LoadBridge(libPath string) (*Bridge, error) {
 	if b.planExecuteSimple, err = lib.FindProc("bridge_plan_execute_simple"); err != nil {
 		return nil, fmt.Errorf("failed to find bridge_plan_execute_simple: %w", err)
 	}
+	if b.planExecutePrint, err = lib.FindProc("bridge_plan_execute_and_print"); err != nil {
+		return nil, fmt.Errorf("failed to find bridge_plan_execute_and_print: %w", err)
+	}
 	if b.planExecuteArrow, err = lib.FindProc("bridge_plan_execute_arrow"); err != nil {
 		return nil, fmt.Errorf("failed to find bridge_plan_execute_arrow: %w", err)
+	}
+	if b.planCollectDF, err = lib.FindProc("bridge_plan_collect_df"); err != nil {
+		return nil, fmt.Errorf("failed to find bridge_plan_collect_df: %w", err)
+	}
+	if b.dfToIPC, err = lib.FindProc("bridge_df_to_ipc"); err != nil {
+		return nil, fmt.Errorf("failed to find bridge_df_to_ipc: %w", err)
+	}
+	if b.dfPrint, err = lib.FindProc("bridge_df_print"); err != nil {
+		return nil, fmt.Errorf("failed to find bridge_df_print: %w", err)
+	}
+	if b.dfFree, err = lib.FindProc("bridge_df_free"); err != nil {
+		return nil, fmt.Errorf("failed to find bridge_df_free: %w", err)
 	}
 	if b.outputFree, err = lib.FindProc("bridge_output_free"); err != nil {
 		return nil, fmt.Errorf("failed to find bridge_output_free: %w", err)
@@ -154,15 +175,21 @@ func (b *Bridge) FreePlan(handle uint64) {
 	b.planFree.Call(uintptr(handle))
 }
 
-// ExecuteSimple 简单执行（JSON in/out）
-func (b *Bridge) ExecuteSimple(handle uint64, inputJSON string) (string, error) {
+// ExecuteSimple 简单执行（返回 Arrow IPC 二进制数据）
+func (b *Bridge) ExecuteSimple(handle uint64, inputJSON string) ([]byte, error) {
 	inputBytes := []byte(inputJSON)
 	var outputPtr uintptr
 	var outputLen uintptr
 
+	// 处理空输入的情况（文件扫描不需要输入数据）
+	var inputPtr uintptr
+	if len(inputBytes) > 0 {
+		inputPtr = uintptr(unsafe.Pointer(&inputBytes[0]))
+	}
+
 	ret, _, _ := b.planExecuteSimple.Call(
 		uintptr(handle),
-		uintptr(unsafe.Pointer(&inputBytes[0])),
+		inputPtr,
 		uintptr(len(inputBytes)),
 		uintptr(unsafe.Pointer(&outputPtr)),
 		uintptr(unsafe.Pointer(&outputLen)),
@@ -170,13 +197,109 @@ func (b *Bridge) ExecuteSimple(handle uint64, inputJSON string) (string, error) 
 	runtime.KeepAlive(inputBytes)
 
 	if ret != 0 {
-		return "", b.getLastError()
+		return nil, b.getLastError()
 	}
 
-	output := ptrToString(outputPtr, int(outputLen))
+	// 把二进制数据拷贝到 Go 的 slice
+	output := make([]byte, outputLen)
+	for i := uintptr(0); i < outputLen; i++ {
+		output[i] = *(*byte)(unsafe.Pointer(outputPtr + i))
+	}
 	b.outputFree.Call(outputPtr, outputLen)
 
 	return output, nil
+}
+
+// ExecuteArrow 执行计划并通过 Arrow C Data Interface 返回结果（零拷贝）。
+// 输入的 schema/array 所有权会转移给 Rust，调用方不要再释放它们。
+// 调用方负责在消费完成后释放 outSchema/outArray（ReleaseArrowSchema/ReleaseArrowArray）。
+func (b *Bridge) ExecuteArrow(
+	handle uint64,
+	inputSchema *ArrowSchema,
+	inputArray *ArrowArray,
+) (*ArrowSchema, *ArrowArray, error) {
+	if !cgoEnabled {
+		return nil, nil, fmt.Errorf("ExecuteArrow requires cgo (set CGO_ENABLED=1)")
+	}
+
+	outSchema := &ArrowSchema{}
+	outArray := &ArrowArray{}
+
+	ret, _, _ := b.planExecuteArrow.Call(
+		uintptr(handle),
+		uintptr(unsafe.Pointer(inputSchema)),
+		uintptr(unsafe.Pointer(inputArray)),
+		uintptr(unsafe.Pointer(outSchema)),
+		uintptr(unsafe.Pointer(outArray)),
+	)
+
+	if ret != 0 {
+		return nil, nil, b.getLastError()
+	}
+
+	return outSchema, outArray, nil
+}
+
+// ExecuteAndPrint 执行并打印结果（使用 Polars 原生 Display）
+func (b *Bridge) ExecuteAndPrint(handle uint64) error {
+	ret, _, _ := b.planExecutePrint.Call(uintptr(handle))
+
+	if ret != 0 {
+		return b.getLastError()
+	}
+
+	return nil
+}
+
+// CollectPlanDF 执行计划并返回 DataFrame 句柄
+func (b *Bridge) CollectPlanDF(planHandle uint64, inputDFHandle uint64) (uint64, error) {
+	var dfHandle uint64
+	ret, _, _ := b.planCollectDF.Call(
+		uintptr(planHandle),
+		uintptr(inputDFHandle),
+		uintptr(unsafe.Pointer(&dfHandle)),
+	)
+
+	if ret != 0 {
+		return 0, b.getLastError()
+	}
+	return dfHandle, nil
+}
+
+// DataFrameToIPC 将 DataFrame 导出为 Arrow IPC 二进制数据
+func (b *Bridge) DataFrameToIPC(handle uint64) ([]byte, error) {
+	var outputPtr uintptr
+	var outputLen uintptr
+	ret, _, _ := b.dfToIPC.Call(
+		uintptr(handle),
+		uintptr(unsafe.Pointer(&outputPtr)),
+		uintptr(unsafe.Pointer(&outputLen)),
+	)
+	if ret != 0 {
+		return nil, b.getLastError()
+	}
+
+	output := make([]byte, outputLen)
+	for i := uintptr(0); i < outputLen; i++ {
+		output[i] = *(*byte)(unsafe.Pointer(outputPtr + i))
+	}
+	b.outputFree.Call(outputPtr, outputLen)
+
+	return output, nil
+}
+
+// DataFramePrint 打印 DataFrame（使用 Polars 原生 Display）
+func (b *Bridge) DataFramePrint(handle uint64) error {
+	ret, _, _ := b.dfPrint.Call(uintptr(handle))
+	if ret != 0 {
+		return b.getLastError()
+	}
+	return nil
+}
+
+// FreeDataFrame 释放 DataFrame 句柄
+func (b *Bridge) FreeDataFrame(handle uint64) {
+	b.dfFree.Call(uintptr(handle))
 }
 
 func (b *Bridge) getLastError() error {

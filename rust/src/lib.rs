@@ -5,6 +5,8 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 use std::slice;
 use prost::Message;
+use polars::prelude::{DataFrame, Series, AnyValue, IntoLazy, NamedFrom};
+use polars::series::SeriesIter;
 
 mod proto {
     include!("proto/polars_bridge.rs");
@@ -13,6 +15,7 @@ mod proto {
 mod executor;
 mod error;
 mod arrow_bridge;
+mod expr_str;
 
 use error::{BridgeError, ErrorCode};
 
@@ -99,7 +102,7 @@ pub extern "C" fn bridge_capabilities(ptr_out: *mut *const c_char, len_out: *mut
             "min_plan_version_supported": 1,
             "max_plan_version_supported": 1,
             "supported_nodes": ["MemoryScan", "Project", "Filter", "WithColumns", "Limit"],
-            "supported_exprs": ["Col", "Lit", "Binary", "Alias", "IsNull"],
+            "supported_exprs": ["Col", "Lit", "Binary", "Alias", "IsNull", "Not", "Wildcard", "Cast", "StrLenBytes", "StrLenChars", "StrContains", "StrStartsWith", "StrEndsWith", "StrExtract", "StrReplace", "StrReplaceAll", "StrToLowercase", "StrToUppercase", "StrStripChars", "StrSlice", "StrSplit", "StrPadStart", "StrPadEnd"],
             "supported_dtypes": ["Int64", "Float64", "Bool", "Utf8"],
             "execution_modes": ["collect"],
             "copy_behavior": "copy_on_boundary"
@@ -186,76 +189,265 @@ pub extern "C" fn bridge_plan_free(plan_handle: u64) {
     }
 }
 
-// 4. 执行
+// 4. 执行（返回 Arrow IPC 二进制数据）
 #[no_mangle]
 pub extern "C" fn bridge_plan_execute_simple(
     plan_handle: u64,
-    input_json_ptr: *const c_char,
-    input_json_len: usize,
-    output_json_ptr: *mut *mut c_char,
-    output_json_len: *mut usize,
+    _input_json_ptr: *const c_char,
+    _input_json_len: usize,
+    output_ptr: *mut *mut u8,
+    output_len: *mut usize,
 ) -> c_int {
     ffi_guard!({
-        if plan_handle == 0 || input_json_ptr.is_null() || output_json_ptr.is_null() || output_json_len.is_null() {
+        if plan_handle == 0 || output_ptr.is_null() || output_len.is_null() {
             return Err(BridgeError::InvalidArgument("Null pointers".into()));
         }
         
         let plan = unsafe { &*(plan_handle as *const proto::Plan) };
-        let input_json = unsafe { slice::from_raw_parts(input_json_ptr as *const u8, input_json_len) };
-        let input_str = std::str::from_utf8(input_json)
-            .map_err(|e| BridgeError::InvalidArgument(format!("Invalid UTF-8: {}", e)))?;
         
-        let result_json = executor::execute_plan(plan, input_str)?;
-        let result_cstr = CString::new(result_json).unwrap();
+        // 注意：input_json 参数被忽略，因为数据源已经在 Plan 里（CsvScan 等）
+        let result_bytes = executor::execute_plan(plan)?;
+        
+        // 分配内存并拷贝结果
+        let len = result_bytes.len();
+        let ptr = result_bytes.as_ptr() as *mut u8;
         
         unsafe {
-            *output_json_len = result_cstr.as_bytes().len();
-            *output_json_ptr = result_cstr.into_raw();
+            *output_len = len;
+            *output_ptr = ptr;
         }
+        
+        // 防止 Rust 释放这块内存
+        std::mem::forget(result_bytes);
         
         Ok(0)
     })
 }
 
+// 4b. 执行并返回 DataFrame（句柄）
 #[no_mangle]
-pub extern "C" fn bridge_output_free(ptr: *mut c_char, _len: usize) {
-    if !ptr.is_null() {
+pub extern "C" fn bridge_plan_collect_df(
+    plan_handle: u64,
+    input_df_handle: u64,
+    out_df_handle_ptr: *mut u64,
+) -> c_int {
+    ffi_guard!({
+        if plan_handle == 0 || out_df_handle_ptr.is_null() {
+            return Err(BridgeError::InvalidArgument("Null pointers".into()));
+        }
+
+        let plan = unsafe { &*(plan_handle as *const proto::Plan) };
+        let input_df = if input_df_handle != 0 {
+            Some(unsafe { &*(input_df_handle as *const DataFrame) })
+        } else {
+            None
+        };
+
+        let df = executor::execute_plan_df(plan, input_df)?;
+        let handle = Box::into_raw(Box::new(df)) as u64;
         unsafe {
-            let _ = CString::from_raw(ptr);
+            *out_df_handle_ptr = handle;
+        }
+
+        Ok(0)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn bridge_output_free(ptr: *mut u8, len: usize) {
+    if !ptr.is_null() && len > 0 {
+        unsafe {
+            // 重新构造 Vec 并让它自动释放
+            let _ = Vec::from_raw_parts(ptr, len, len);
         }
     }
 }
 
-// 5. Arrow-based execution (zero-copy)
-use arrow::ffi::{FFI_ArrowSchema, FFI_ArrowArray};
-
+// 4c. DataFrame -> Arrow IPC
 #[no_mangle]
-pub extern "C" fn bridge_plan_execute_arrow(
-    plan_handle: u64,
-    input_schema: *const FFI_ArrowSchema,
-    input_array: *const FFI_ArrowArray,
-    output_schema: *mut FFI_ArrowSchema,
-    output_array: *mut FFI_ArrowArray,
+pub extern "C" fn bridge_df_to_ipc(
+    df_handle: u64,
+    output_ptr: *mut *mut u8,
+    output_len: *mut usize,
 ) -> c_int {
     ffi_guard!({
-        if plan_handle == 0 || input_schema.is_null() || input_array.is_null() 
-            || output_schema.is_null() || output_array.is_null() {
+        if df_handle == 0 || output_ptr.is_null() || output_len.is_null() {
             return Err(BridgeError::InvalidArgument("Null pointers".into()));
+        }
+
+        let df = unsafe { &*(df_handle as *const DataFrame) };
+        let result_bytes = executor::df_to_ipc(df)?;
+
+        let len = result_bytes.len();
+        let ptr = result_bytes.as_ptr() as *mut u8;
+
+        unsafe {
+            *output_len = len;
+            *output_ptr = ptr;
+        }
+
+        std::mem::forget(result_bytes);
+        Ok(0)
+    })
+}
+
+// 4d. 打印 DataFrame
+#[no_mangle]
+pub extern "C" fn bridge_df_print(df_handle: u64) -> c_int {
+    ffi_guard!({
+        if df_handle == 0 {
+            return Err(BridgeError::InvalidArgument("Null dataframe handle".into()));
+        }
+
+        let df = unsafe { &*(df_handle as *const DataFrame) };
+        executor::df_print(df)?;
+        Ok(0)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn bridge_df_free(df_handle: u64) {
+    if df_handle != 0 {
+        unsafe {
+            let _ = Box::from_raw(df_handle as *mut DataFrame);
+        }
+    }
+}
+
+// 5. 执行并直接打印（使用 Polars 原生 Display）
+#[no_mangle]
+pub extern "C" fn bridge_plan_execute_and_print(
+    plan_handle: u64,
+) -> c_int {
+    ffi_guard!({
+        if plan_handle == 0 {
+            return Err(BridgeError::InvalidArgument("Null plan handle".into()));
         }
         
         let plan = unsafe { &*(plan_handle as *const proto::Plan) };
         
-        // 从 Arrow 导入 DataFrame
-        let input_df = arrow_bridge::import_dataframe_from_arrow(input_schema, input_array)?;
-        
-        // 执行查询计划
-        let root = plan.root.as_ref()
-            .ok_or_else(|| BridgeError::PlanSemantic("Plan has no root node".into()))?;
-        let result_df = executor::execute_node(root, input_df)?;
-        
-        // 导出为 Arrow
-        arrow_bridge::export_dataframe_to_arrow(&result_df, output_schema, output_array)?;
+        // 执行并打印结果
+        executor::execute_and_print(plan)?;
         
         Ok(0)
     })
+}
+
+// 5. Arrow-based execution (zero-copy)
+use polars_arrow::ffi::{ArrowArray, ArrowSchema};
+
+#[no_mangle]
+pub extern "C" fn bridge_plan_execute_arrow(
+    plan_handle: u64,
+    input_schema: *const ArrowSchema,
+    input_array: *const ArrowArray,
+    output_schema: *mut ArrowSchema,
+    output_array: *mut ArrowArray,
+) -> c_int {
+    ffi_guard!({
+        if plan_handle == 0 || output_schema.is_null() || output_array.is_null() {
+            return Err(BridgeError::InvalidArgument("Null pointers".into()));
+        }
+
+        if (input_schema.is_null() && !input_array.is_null())
+            || (!input_schema.is_null() && input_array.is_null())
+        {
+            return Err(BridgeError::InvalidArgument(
+                "Input schema/array must both be null or both be set".into(),
+            ));
+        }
+
+        let plan = unsafe { &*(plan_handle as *const proto::Plan) };
+        let input_df = if input_schema.is_null() {
+            None
+        } else {
+            Some(arrow_bridge::import_dataframe_from_arrow(
+                input_schema,
+                input_array,
+            )?)
+        };
+
+        let df = executor::execute_plan_df(plan, input_df.as_ref())?;
+        arrow_bridge::export_dataframe_to_arrow(&df, output_schema, output_array)?;
+        Ok(0)
+    })
+}
+
+// 6. 从列数据创建 DataFrame（支持动态类型推断）
+// 数据格式：JSON array of columns
+// [{"name": "col1", "values": [1, 2, 3]}, {"name": "col2", "values": ["a", "b", "c"]}]
+#[no_mangle]
+pub extern "C" fn bridge_df_from_columns(
+    json_ptr: *const c_char,
+    json_len: usize,
+    out_df_handle: *mut u64,
+) -> c_int {
+    ffi_guard!({
+        if json_ptr.is_null() || out_df_handle.is_null() {
+            return Err(BridgeError::InvalidArgument("Null pointers".into()));
+        }
+
+        // 读取 JSON 数据
+        let json_slice = unsafe { slice::from_raw_parts(json_ptr as *const u8, json_len) };
+        let json_str = std::str::from_utf8(json_slice)
+            .map_err(|e| BridgeError::InvalidArgument(format!("Invalid UTF-8: {}", e)))?;
+
+        // 解析 JSON
+        let columns: Vec<serde_json::Value> = serde_json::from_str(json_str)
+            .map_err(|e| BridgeError::InvalidArgument(format!("Invalid JSON: {}", e)))?;
+
+        // 构建 Series 列表
+        let mut series_vec = Vec::new();
+        
+        for col in columns {
+            let name = col["name"].as_str()
+                .ok_or_else(|| BridgeError::InvalidArgument("Column missing 'name' field".into()))?;
+            
+            let values = col["values"].as_array()
+                .ok_or_else(|| BridgeError::InvalidArgument("Column missing 'values' array".into()))?;
+
+            // 将 JSON 值转换为 AnyValue
+            let any_values: Vec<AnyValue> = values.iter()
+                .map(|v| json_value_to_any_value(v))
+                .collect();
+
+            // Polars 自动推断类型！
+            let series = Series::from_any_values(name.into(), &any_values, true)
+                .map_err(|e| BridgeError::Execution(format!("Failed to create series: {}", e)))?;
+            series_vec.push(series);
+        }
+
+        // 创建 DataFrame
+        let columns: Vec<_> = series_vec.into_iter().map(|s| s.into()).collect();
+        let df = DataFrame::new(columns)
+            .map_err(|e| BridgeError::Execution(format!("Failed to create DataFrame: {}", e)))?;
+
+        // 存储 DataFrame 并返回句柄
+        let handle = Box::into_raw(Box::new(df)) as u64;
+        unsafe { *out_df_handle = handle };
+
+        Ok(0)
+    })
+}
+
+// 辅助函数：将 JSON 值转换为 AnyValue
+fn json_value_to_any_value(v: &serde_json::Value) -> AnyValue<'static> {
+    match v {
+        serde_json::Value::Null => AnyValue::Null,
+        serde_json::Value::Bool(b) => AnyValue::Boolean(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                AnyValue::Int64(i)
+            } else if let Some(f) = n.as_f64() {
+                AnyValue::Float64(f)
+            } else {
+                AnyValue::Null
+            }
+        }
+        serde_json::Value::String(s) => {
+            // 需要静态生命周期，所以克隆字符串
+            AnyValue::StringOwned(s.clone().into())
+        }
+        _ => AnyValue::Null,
+    }
 }

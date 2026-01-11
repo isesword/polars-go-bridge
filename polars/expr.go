@@ -4,6 +4,25 @@ import (
 	pb "github.com/polars-go-bridge/proto"
 )
 
+// 数据类型常量
+var (
+	Int64    = pb.DataType_INT64
+	Int32    = pb.DataType_INT32
+	Int16    = pb.DataType_INT16
+	Int8     = pb.DataType_INT8
+	UInt64   = pb.DataType_UINT64
+	UInt32   = pb.DataType_UINT32
+	UInt16   = pb.DataType_UINT16
+	UInt8    = pb.DataType_UINT8
+	Float64  = pb.DataType_FLOAT64
+	Float32  = pb.DataType_FLOAT32
+	Boolean  = pb.DataType_BOOL
+	String   = pb.DataType_UTF8
+	Date     = pb.DataType_DATE
+	Datetime = pb.DataType_DATETIME
+	Time     = pb.DataType_TIME
+)
+
 // Expr 表达式构建器
 type Expr struct {
 	inner *pb.Expr
@@ -17,6 +36,26 @@ func Col(name string) Expr {
 				Col: &pb.Column{
 					Name: name,
 				},
+			},
+		},
+	}
+}
+
+// Cols 创建多列引用表达式（表达式展开）
+func Cols(names ...string) []Expr {
+	exprs := make([]Expr, len(names))
+	for i, name := range names {
+		exprs[i] = Col(name)
+	}
+	return exprs
+}
+
+// All 选择所有列（表达式展开）
+func All() Expr {
+	return Expr{
+		inner: &pb.Expr{
+			Kind: &pb.Expr_Wildcard{
+				Wildcard: &pb.Wildcard{},
 			},
 		},
 	}
@@ -146,6 +185,21 @@ func (e Expr) Or(other Expr) Expr {
 	return e.binaryOp(pb.BinaryOperator_OR, other)
 }
 
+// Mod 取模运算 (%)
+func (e Expr) Mod(other Expr) Expr {
+	return e.binaryOp(pb.BinaryOperator_MOD, other)
+}
+
+// Pow 幂运算 (**)
+func (e Expr) Pow(other Expr) Expr {
+	return e.binaryOp(pb.BinaryOperator_POW, other)
+}
+
+// Xor 异或运算 (^)
+func (e Expr) Xor(other Expr) Expr {
+	return e.binaryOp(pb.BinaryOperator_XOR, other)
+}
+
 // Alias 设置别名
 func (e Expr) Alias(name string) Expr {
 	return Expr{
@@ -171,6 +225,41 @@ func (e Expr) IsNull() Expr {
 			},
 		},
 	}
+}
+
+// Not 逻辑取反 (~)
+func (e Expr) Not() Expr {
+	return Expr{
+		inner: &pb.Expr{
+			Kind: &pb.Expr_Not{
+				Not: &pb.Not{
+					Expr: e.inner,
+				},
+			},
+		},
+	}
+}
+
+// Cast 类型转换（严格模式）
+// 示例: Col("age").Cast(Int32, true)
+func (e Expr) Cast(dataType pb.DataType, strict bool) Expr {
+	return Expr{
+		inner: &pb.Expr{
+			Kind: &pb.Expr_Cast{
+				Cast: &pb.Cast{
+					Expr:     e.inner,
+					DataType: dataType,
+					Strict:   strict,
+				},
+			},
+		},
+	}
+}
+
+// StrictCast 严格模式类型转换（转换失败报错）
+// 示例: Col("age").StrictCast(Int32)
+func (e Expr) StrictCast(dataType pb.DataType) Expr {
+	return e.Cast(dataType, true)
 }
 
 // toProto 转换为 Protobuf 表达式

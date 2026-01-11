@@ -24,6 +24,13 @@ type Bridge struct {
 	planCompile       func(*byte, uintptr, *uint64) int32
 	planFree          func(uint64)
 	planExecuteSimple func(uint64, *byte, uintptr, *uintptr, *uintptr) int32
+	planExecutePrint  func(uint64) int32
+	planExecuteArrow  func(uint64, *ArrowSchema, *ArrowArray, *ArrowSchema, *ArrowArray) int32
+	planCollectDF     func(uint64, uint64, *uint64) int32
+	dfToIPC           func(uint64, *uintptr, *uintptr) int32
+	dfPrint           func(uint64) int32
+	dfFree            func(uint64)
+	dfFromColumns     func(*byte, uintptr, *uint64) int32
 	outputFree        func(uintptr, uintptr)
 }
 
@@ -62,6 +69,13 @@ func LoadBridge(libPath string) (*Bridge, error) {
 	purego.RegisterLibFunc(&b.planCompile, lib, "bridge_plan_compile")
 	purego.RegisterLibFunc(&b.planFree, lib, "bridge_plan_free")
 	purego.RegisterLibFunc(&b.planExecuteSimple, lib, "bridge_plan_execute_simple")
+	purego.RegisterLibFunc(&b.planExecutePrint, lib, "bridge_plan_execute_and_print")
+	purego.RegisterLibFunc(&b.planExecuteArrow, lib, "bridge_plan_execute_arrow")
+	purego.RegisterLibFunc(&b.planCollectDF, lib, "bridge_plan_collect_df")
+	purego.RegisterLibFunc(&b.dfToIPC, lib, "bridge_df_to_ipc")
+	purego.RegisterLibFunc(&b.dfPrint, lib, "bridge_df_print")
+	purego.RegisterLibFunc(&b.dfFree, lib, "bridge_df_free")
+	purego.RegisterLibFunc(&b.dfFromColumns, lib, "bridge_df_from_columns")
 	purego.RegisterLibFunc(&b.outputFree, lib, "bridge_output_free")
 
 	// 验证 ABI 版本
@@ -128,15 +142,21 @@ func (b *Bridge) FreePlan(handle uint64) {
 	b.planFree(handle)
 }
 
-// ExecuteSimple 简单执行（JSON in/out）
-func (b *Bridge) ExecuteSimple(handle uint64, inputJSON string) (string, error) {
+// ExecuteSimple 简单执行（返回 Arrow IPC 二进制数据）
+func (b *Bridge) ExecuteSimple(handle uint64, inputJSON string) ([]byte, error) {
 	inputBytes := []byte(inputJSON)
 	var outputPtr uintptr
 	var outputLen uintptr
 
+	// 处理空输入的情况（文件扫描不需要输入数据）
+	var inputPtr *byte
+	if len(inputBytes) > 0 {
+		inputPtr = &inputBytes[0]
+	}
+
 	ret := b.planExecuteSimple(
 		handle,
-		&inputBytes[0],
+		inputPtr,
 		uintptr(len(inputBytes)),
 		&outputPtr,
 		&outputLen,
@@ -144,13 +164,112 @@ func (b *Bridge) ExecuteSimple(handle uint64, inputJSON string) (string, error) 
 	runtime.KeepAlive(inputBytes)
 
 	if ret != 0 {
-		return "", b.getLastError()
+		return nil, b.getLastError()
 	}
 
-	output := ptrToString(outputPtr, int(outputLen))
+	// 把二进制数据拷贝到 Go 的 slice
+	output := make([]byte, outputLen)
+	for i := uintptr(0); i < outputLen; i++ {
+		output[i] = *(*byte)(unsafe.Pointer(outputPtr + i))
+	}
 	b.outputFree(outputPtr, outputLen)
 
 	return output, nil
+}
+
+// ExecuteArrow 执行计划并通过 Arrow C Data Interface 返回结果（零拷贝）。
+// 输入的 schema/array 所有权会转移给 Rust，调用方不要再释放它们。
+// 调用方负责在消费完成后释放 outSchema/outArray（ReleaseArrowSchema/ReleaseArrowArray）。
+func (b *Bridge) ExecuteArrow(
+	handle uint64,
+	inputSchema *ArrowSchema,
+	inputArray *ArrowArray,
+) (*ArrowSchema, *ArrowArray, error) {
+	if !cgoEnabled {
+		return nil, nil, fmt.Errorf("ExecuteArrow requires cgo (set CGO_ENABLED=1)")
+	}
+
+	outSchema := &ArrowSchema{}
+	outArray := &ArrowArray{}
+
+	ret := b.planExecuteArrow(handle, inputSchema, inputArray, outSchema, outArray)
+	if ret != 0 {
+		return nil, nil, b.getLastError()
+	}
+
+	return outSchema, outArray, nil
+}
+
+// ExecuteAndPrint 执行并打印结果（使用 Polars 原生 Display）
+func (b *Bridge) ExecuteAndPrint(handle uint64) error {
+	ret := b.planExecutePrint(handle)
+
+	if ret != 0 {
+		return b.getLastError()
+	}
+
+	return nil
+}
+
+// CollectPlanDF 执行计划并返回 DataFrame 句柄
+func (b *Bridge) CollectPlanDF(planHandle uint64, inputDFHandle uint64) (uint64, error) {
+	var dfHandle uint64
+	ret := b.planCollectDF(planHandle, inputDFHandle, &dfHandle)
+
+	if ret != 0 {
+		return 0, b.getLastError()
+	}
+	return dfHandle, nil
+}
+
+// CreateDataFrameFromColumns 从 JSON 格式的列数据创建 DataFrame
+// jsonData 格式: [{"name": "col1", "values": [1, 2, 3]}, {"name": "col2", "values": ["a", "b", "c"]}]
+func (b *Bridge) CreateDataFrameFromColumns(jsonData []byte) (uint64, error) {
+	if len(jsonData) == 0 {
+		return 0, fmt.Errorf("jsonData is empty")
+	}
+
+	var dfHandle uint64
+	ret := b.dfFromColumns(&jsonData[0], uintptr(len(jsonData)), &dfHandle)
+
+	if ret != 0 {
+		return 0, b.getLastError()
+	}
+
+	return dfHandle, nil
+}
+
+// DataFrameToIPC 将 DataFrame 导出为 Arrow IPC 二进制数据
+func (b *Bridge) DataFrameToIPC(handle uint64) ([]byte, error) {
+	var outputPtr uintptr
+	var outputLen uintptr
+
+	ret := b.dfToIPC(handle, &outputPtr, &outputLen)
+	if ret != 0 {
+		return nil, b.getLastError()
+	}
+
+	output := make([]byte, outputLen)
+	for i := uintptr(0); i < outputLen; i++ {
+		output[i] = *(*byte)(unsafe.Pointer(outputPtr + i))
+	}
+	b.outputFree(outputPtr, outputLen)
+
+	return output, nil
+}
+
+// DataFramePrint 打印 DataFrame（使用 Polars 原生 Display）
+func (b *Bridge) DataFramePrint(handle uint64) error {
+	ret := b.dfPrint(handle)
+	if ret != 0 {
+		return b.getLastError()
+	}
+	return nil
+}
+
+// FreeDataFrame 释放 DataFrame 句柄
+func (b *Bridge) FreeDataFrame(handle uint64) {
+	b.dfFree(handle)
 }
 
 func (b *Bridge) getLastError() error {

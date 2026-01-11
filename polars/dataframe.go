@@ -1,7 +1,6 @@
 package polars
 
 import (
-	"encoding/json"
 	"fmt"
 
 	"github.com/polars-go-bridge/bridge"
@@ -11,11 +10,12 @@ import (
 
 // LazyFrame 惰性数据框架（延迟执行）
 type LazyFrame struct {
-	root   *pb.Node
-	nodeID uint32
+	root    *pb.Node
+	nodeID  uint32
+	inputDF *DataFrame
 }
 
-// NewLazyFrame 从输入数据创建 LazyFrame
+// NewLazyFrame 从内存数据创建 LazyFrame
 func NewLazyFrame(data []map[string]interface{}) *LazyFrame {
 	return &LazyFrame{
 		root: &pb.Node{
@@ -26,7 +26,40 @@ func NewLazyFrame(data []map[string]interface{}) *LazyFrame {
 				},
 			},
 		},
-		nodeID: 1,
+		nodeID:  1,
+		inputDF: nil,
+	}
+}
+
+// ScanCSV 从 CSV 文件路径创建 LazyFrame（懒加载）
+func ScanCSV(path string) *LazyFrame {
+	return &LazyFrame{
+		root: &pb.Node{
+			Id: 1,
+			Kind: &pb.Node_CsvScan{
+				CsvScan: &pb.CsvScan{
+					Path: path,
+				},
+			},
+		},
+		nodeID:  1,
+		inputDF: nil,
+	}
+}
+
+// ScanParquet 从 Parquet 文件路径创建 LazyFrame（懒加载）
+func ScanParquet(path string) *LazyFrame {
+	return &LazyFrame{
+		root: &pb.Node{
+			Id: 1,
+			Kind: &pb.Node_ParquetScan{
+				ParquetScan: &pb.ParquetScan{
+					Path: path,
+				},
+			},
+		},
+		nodeID:  1,
+		inputDF: nil,
 	}
 }
 
@@ -49,8 +82,9 @@ func (lf *LazyFrame) Filter(predicate Expr) *LazyFrame {
 	}
 
 	return &LazyFrame{
-		root:   newNode,
-		nodeID: lf.nodeID,
+		root:    newNode,
+		nodeID:  lf.nodeID,
+		inputDF: lf.inputDF,
 	}
 }
 
@@ -72,8 +106,9 @@ func (lf *LazyFrame) Select(exprs ...Expr) *LazyFrame {
 	}
 
 	return &LazyFrame{
-		root:   newNode,
-		nodeID: lf.nodeID,
+		root:    newNode,
+		nodeID:  lf.nodeID,
+		inputDF: lf.inputDF,
 	}
 }
 
@@ -95,8 +130,9 @@ func (lf *LazyFrame) WithColumns(exprs ...Expr) *LazyFrame {
 	}
 
 	return &LazyFrame{
-		root:   newNode,
-		nodeID: lf.nodeID,
+		root:    newNode,
+		nodeID:  lf.nodeID,
+		inputDF: lf.inputDF,
 	}
 }
 
@@ -113,13 +149,20 @@ func (lf *LazyFrame) Limit(n uint64) *LazyFrame {
 	}
 
 	return &LazyFrame{
-		root:   newNode,
-		nodeID: lf.nodeID,
+		root:    newNode,
+		nodeID:  lf.nodeID,
+		inputDF: lf.inputDF,
 	}
 }
 
-// Collect 执行查询并收集结果
-func (lf *LazyFrame) Collect(brg *bridge.Bridge, inputData []map[string]interface{}) ([]map[string]interface{}, error) {
+// Collect 执行查询并返回 DataFrame（使用完请调用 Free）
+func (lf *LazyFrame) Collect(brg *bridge.Bridge) (*DataFrame, error) {
+	if lf == nil {
+		return nil, fmt.Errorf("lazyframe is nil")
+	}
+	if lf.inputDF != nil && lf.inputDF.brg != brg {
+		return nil, fmt.Errorf("bridge mismatch for input dataframe")
+	}
 	// 1. 构建 Plan
 	plan := &pb.Plan{
 		PlanVersion: 1,
@@ -138,23 +181,71 @@ func (lf *LazyFrame) Collect(brg *bridge.Bridge, inputData []map[string]interfac
 	}
 	defer brg.FreePlan(handle)
 
-	// 3. 准备输入数据
-	inputJSON, err := json.Marshal(inputData)
+	// 3. 执行查询并返回 DataFrame 句柄
+	inputHandle := uint64(0)
+	if lf.inputDF != nil {
+		inputHandle = lf.inputDF.handle
+	}
+	dfHandle, err := brg.CollectPlanDF(handle, inputHandle)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal input: %w", err)
+		return nil, fmt.Errorf("failed to collect dataframe: %w", err)
 	}
 
-	// 4. 执行查询
-	outputJSON, err := brg.ExecuteSimple(handle, string(inputJSON))
+	return newDataFrame(dfHandle, brg), nil
+}
+
+// CollectRows 执行查询并返回行数据（用于兼容旧接口）
+func (lf *LazyFrame) CollectRows(brg *bridge.Bridge) ([]map[string]interface{}, error) {
+	df, err := lf.Collect(brg)
 	if err != nil {
-		return nil, fmt.Errorf("failed to execute plan: %w", err)
+		return nil, err
+	}
+	defer df.Free()
+
+	rows, err := df.Rows()
+	if err != nil {
+		return nil, fmt.Errorf("failed to export rows: %w", err)
+	}
+	return rows, nil
+}
+
+// Print 执行查询并直接打印结果（使用 Polars 原生的 Display）
+func (lf *LazyFrame) Print(brg *bridge.Bridge) error {
+	if lf == nil {
+		return fmt.Errorf("lazyframe is nil")
+	}
+	if lf.inputDF != nil {
+		df, err := lf.Collect(brg)
+		if err != nil {
+			return err
+		}
+		defer df.Free()
+		return df.Print()
 	}
 
-	// 5. 解析结果（NDJSON 格式）
-	result, err := parseNDJSON(outputJSON)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse output: %w", err)
+	// 1. 构建 Plan
+	plan := &pb.Plan{
+		PlanVersion: 1,
+		Root:        lf.root,
 	}
 
-	return result, nil
+	// 2. 编译 Plan
+	planBytes, err := proto.Marshal(plan)
+	if err != nil {
+		return fmt.Errorf("failed to marshal plan: %w", err)
+	}
+
+	handle, err := brg.CompilePlan(planBytes)
+	if err != nil {
+		return fmt.Errorf("failed to compile plan: %w", err)
+	}
+	defer brg.FreePlan(handle)
+
+	// 3. 执行并打印（调用 Polars 原生的 Display）
+	err = brg.ExecuteAndPrint(handle)
+	if err != nil {
+		return fmt.Errorf("failed to execute and print: %w", err)
+	}
+
+	return nil
 }
