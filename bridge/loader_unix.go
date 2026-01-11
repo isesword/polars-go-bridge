@@ -231,6 +231,7 @@ func (b *Bridge) CreateDataFrameFromColumns(jsonData []byte) (uint64, error) {
 
 	var dfHandle uint64
 	ret := b.dfFromColumns(&jsonData[0], uintptr(len(jsonData)), &dfHandle)
+	runtime.KeepAlive(jsonData) // 确保在 FFI 调用期间 jsonData 不被 GC
 
 	if ret != 0 {
 		return 0, b.getLastError()
