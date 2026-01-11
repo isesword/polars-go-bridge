@@ -10,7 +10,6 @@ import (
 	"runtime"
 	"syscall"
 	"unsafe"
-	
 )
 
 // Bridge Rust FFI 接口
@@ -30,6 +29,7 @@ type Bridge struct {
 	dfToIPC           *syscall.Proc
 	dfPrint           *syscall.Proc
 	dfFree            *syscall.Proc
+	dfFromColumns     *syscall.Proc
 	outputFree        *syscall.Proc
 }
 
@@ -101,6 +101,9 @@ func LoadBridge(libPath string) (*Bridge, error) {
 	}
 	if b.dfFree, err = lib.FindProc("bridge_df_free"); err != nil {
 		return nil, fmt.Errorf("failed to find bridge_df_free: %w", err)
+	}
+	if b.dfFromColumns, err = lib.FindProc("bridge_df_from_columns"); err != nil {
+		return nil, fmt.Errorf("failed to find bridge_df_from_columns: %w", err)
 	}
 	if b.outputFree, err = lib.FindProc("bridge_output_free"); err != nil {
 		return nil, fmt.Errorf("failed to find bridge_output_free: %w", err)
@@ -300,6 +303,27 @@ func (b *Bridge) DataFramePrint(handle uint64) error {
 // FreeDataFrame 释放 DataFrame 句柄
 func (b *Bridge) FreeDataFrame(handle uint64) {
 	b.dfFree.Call(uintptr(handle))
+}
+
+// CreateDataFrameFromColumns 从列数据创建 DataFrame（JSON 格式）
+func (b *Bridge) CreateDataFrameFromColumns(jsonData []byte) (uint64, error) {
+	if len(jsonData) == 0 {
+		return 0, fmt.Errorf("jsonData is empty")
+	}
+
+	var dfHandle uint64
+	ret, _, _ := b.dfFromColumns.Call(
+		uintptr(unsafe.Pointer(&jsonData[0])),
+		uintptr(len(jsonData)),
+		uintptr(unsafe.Pointer(&dfHandle)),
+	)
+	runtime.KeepAlive(jsonData)
+
+	if ret != 0 {
+		return 0, b.getLastError()
+	}
+
+	return dfHandle, nil
 }
 
 func (b *Bridge) getLastError() error {
