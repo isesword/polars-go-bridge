@@ -3,8 +3,8 @@ package polars
 import (
 	"fmt"
 
-	"github.com/polars-go-bridge/bridge"
-	pb "github.com/polars-go-bridge/proto"
+	"github.com/isesword/polars-go-bridge/bridge"
+	pb "github.com/isesword/polars-go-bridge/proto"
 	"google.golang.org/protobuf/proto"
 )
 

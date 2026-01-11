@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"runtime"
 
-	"github.com/polars-go-bridge/bridge"
-	pb "github.com/polars-go-bridge/proto"
+	"github.com/isesword/polars-go-bridge/bridge"
+	pb "github.com/isesword/polars-go-bridge/proto"
 )
 
 // DataFrame represents an eager Polars DataFrame held by the Rust engine.

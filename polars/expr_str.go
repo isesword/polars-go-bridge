@@ -1,7 +1,7 @@
 package polars
 
 import (
-	pb "github.com/polars-go-bridge/proto"
+	pb "github.com/isesword/polars-go-bridge/proto"
 )
 
 // StrLenBytes 计算字符串字节长度

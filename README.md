@@ -36,7 +36,7 @@ Go (获取结果)
 #### 1. 安装 Go 包
 
 ```bash
-go get github.com/polars-go-bridge
+go get github.com/isesword/polars-go-bridge
 ```
 
 #### 2. 下载预编译的动态库
@@ -60,8 +60,8 @@ package main
 
 import (
     "log"
-    "github.com/polars-go-bridge/bridge"
-    "github.com/polars-go-bridge/polars"
+    "github.com/isesword/polars-go-bridge/bridge"
+    "github.com/isesword/polars-go-bridge/polars"
 )
 
 func main() {
@@ -130,8 +130,8 @@ package main
 import (
     "fmt"
     "log"
-    "github.com/polars-go-bridge/bridge"
-    "github.com/polars-go-bridge/polars"
+    "github.com/isesword/polars-go-bridge/bridge"
+    "github.com/isesword/polars-go-bridge/polars"
 )
 
 func main() {

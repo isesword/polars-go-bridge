@@ -108,7 +108,9 @@ jobs:
           echo "POLARS_BRIDGE_LIB=$PWD\polars_bridge.dll" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Download Go Dependencies
-        run: go mod download
+        run: |
+          go mod tidy
+          go mod download
 
       - name: Run Tests
         run: go test ./... -v -count=1

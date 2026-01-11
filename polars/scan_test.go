@@ -6,8 +6,8 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
-	"github.com/polars-go-bridge/bridge"
-	pb "github.com/polars-go-bridge/proto"
+	"github.com/isesword/polars-go-bridge/bridge"
+	pb "github.com/isesword/polars-go-bridge/proto"
 	"google.golang.org/protobuf/proto"
 )
 

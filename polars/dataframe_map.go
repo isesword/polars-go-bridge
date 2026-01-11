@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"reflect"
 
-	"github.com/polars-go-bridge/bridge"
+	"github.com/isesword/polars-go-bridge/bridge"
 )
 
 // NewDataFrameFromMap 从 map 创建 DataFrame（类似 py-polars 的 DataFrame(dict) 方式）

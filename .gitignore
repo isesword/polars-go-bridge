@@ -9,7 +9,6 @@ rust/src/proto/
 *.dll
 *.so
 *.dylib
-go.sum
 
 # IDE
 .vscode/

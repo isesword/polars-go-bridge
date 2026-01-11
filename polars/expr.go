@@ -1,7 +1,7 @@
 package polars
 
 import (
-	pb "github.com/polars-go-bridge/proto"
+	pb "github.com/isesword/polars-go-bridge/proto"
 )
 
 // 数据类型常量
